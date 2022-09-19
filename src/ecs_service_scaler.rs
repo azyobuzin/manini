@@ -1,17 +1,18 @@
-use anyhow::Context;
+use anyhow::Context as _;
 use aws_sdk_ec2 as ec2;
 use aws_sdk_ecs as ecs;
 use ecs::model::{DesiredStatus, HealthStatus};
-use futures::future::pending;
-use futures::TryFutureExt;
-use log::{error, info, warn};
+use futures::{Future, TryFutureExt};
+use log::{debug, error, info, warn};
 use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::sync::watch::Sender;
 use tokio::sync::{watch, Notify};
 use tokio::time::{sleep, sleep_until, Instant};
+use tokio::{pin, select, spawn};
 
 #[derive(Clone, Debug)]
 pub struct ServiceScalerOptions {
@@ -44,17 +45,23 @@ enum TaskStatus {
 }
 
 impl ServiceScaler {
-    pub async fn target_addr(&mut self) -> IpAddr {
-        loop {
-            self.request_notify.notify_one();
+    pub fn poll_target_addr(&mut self, cx: &mut Context) -> Poll<IpAddr> {
+        self.request_notify.notify_one();
 
+        loop {
             if let ServiceStatus::Healthy(addr) = *self.service_status_rx.borrow_and_update() {
-                return addr;
+                return Poll::Ready(addr);
             }
 
-            if let Err(_) = self.service_status_rx.changed().await {
-                // If the sender is dropped, this task never completes
-                pending().await
+            // Propagate the context to receive notification
+            let fut = self.service_status_rx.changed();
+            pin!(fut);
+
+            match fut.poll(cx) {
+                Poll::Ready(Ok(())) => {
+                    // We can read the new value. Retry
+                }
+                _ => return Poll::Pending,
             }
         }
     }
@@ -68,7 +75,7 @@ pub fn run_scaler(options: ServiceScalerOptions) -> ServiceScaler {
         request_notify: request_notify.clone(),
     };
 
-    tokio::spawn(async move {
+    spawn(async move {
         let mut next_health_check_time = Instant::now();
         let mut scale_down_time = Some(next_health_check_time + options.scale_down_period);
         const HEALTH_CHECK_PERIOD: Duration = Duration::from_secs(30);
@@ -83,7 +90,7 @@ pub fn run_scaler(options: ServiceScalerOptions) -> ServiceScaler {
                 _ => (TimeoutAction::HealthCheck, next_health_check_time),
             };
 
-            tokio::select! {
+            select! {
                 _ = request_notify.notified() => {
                     if *service_status_tx.borrow() == ServiceStatus::Unhealthy {
                         let scale_result = scale_up_service(&options)
@@ -115,6 +122,8 @@ pub fn run_scaler(options: ServiceScalerOptions) -> ServiceScaler {
                     match timeout_action {
                         TimeoutAction::HealthCheck => {
                             // Check ECS status if nothing happened within 30 secs
+                            debug!("Starting health check");
+
                             let result = match get_task_status(&options).await {
                                 Ok(TaskStatus::Healthy) =>  match get_service_ip(&options).await {
                                     Ok(Some(addr)) => Ok(ServiceStatus::Healthy(addr)),

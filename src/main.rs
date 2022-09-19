@@ -1,8 +1,13 @@
 use aws_sdk_ec2 as ec2;
 use aws_sdk_ecs as ecs;
 use clap::Parser;
-use hyper::{Body, Request, Response, Server};
-use manini::ServiceScalerOptions;
+use hyper::server::conn::AddrStream;
+use hyper::service::make_service_fn;
+use hyper::Server;
+use log::error;
+use manini::{ProxyService, ServiceScalerOptions};
+use std::convert::Infallible;
+use std::future::ready;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -57,17 +62,33 @@ struct Cli {
 }
 
 async fn async_main(cli: Cli) {
-    let config = aws_config::load_from_env().await;
-    manini::run_scaler(ServiceScalerOptions {
-        ecs_client: ecs::Client::new(&config),
-        ec2_client: ec2::Client::new(&config),
-        cluster_name: cli.cluster,
-        service_name: cli.service,
-        use_public_ip: cli.public_ip,
-        scale_down_period: Duration::from_secs(cli.scale_down_period),
+    let service_scaler = {
+        let config = aws_config::load_from_env().await;
+        manini::run_scaler(ServiceScalerOptions {
+            ecs_client: ecs::Client::new(&config),
+            ec2_client: ec2::Client::new(&config),
+            cluster_name: cli.cluster,
+            service_name: cli.service,
+            use_public_ip: cli.public_ip,
+            scale_down_period: Duration::from_secs(cli.scale_down_period),
+        })
+    };
+    let http_client = hyper::Client::new();
+    let svc = make_service_fn(|conn: &AddrStream| {
+        ready(Ok::<_, Infallible>(ProxyService::new(
+            service_scaler.clone(),
+            cli.target_port,
+            http_client.clone(),
+            conn.remote_addr().ip(),
+        )))
     });
+    let server = Server::bind(&cli.bind)
+        .serve(svc)
+        .with_graceful_shutdown(shutdown_signal());
 
-    //let server = Server::bind(&cli.bind).serve();
+    if let Err(e) = server.await {
+        error!("{}", e);
+    }
 }
 
 async fn shutdown_signal() {
