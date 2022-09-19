@@ -1,2 +1,2 @@
-mod service_scaler;
-pub use self::service_scaler::{run_scaler, ServiceScaler};
+mod ecs_service_scaler;
+pub use self::ecs_service_scaler::{run_scaler, ServiceScaler, ServiceScalerOptions};
