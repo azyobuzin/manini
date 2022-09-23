@@ -130,7 +130,7 @@ pub fn run_scaler(options: ServiceScalerOptions) -> ServiceScaler {
                     debug!("alive_connections = {}", alive_connections);
 
                     if alive_connections <= 0 {
-                        debug_assert!(alive_connections == 0);
+                        assert_eq!(alive_connections, 0);
                         scale_down_time = Some(Instant::now() + options.scale_down_period);
                     } else {
                         scale_down_time = None;
