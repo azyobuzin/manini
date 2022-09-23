@@ -146,6 +146,7 @@ fn is_supported_method(method: &Method) -> bool {
 
 fn is_get_html_request<B>(req: &Request<B>) -> bool {
     req.method() == Method::GET
+        && !req.headers().contains_key(UPGRADE)
         && req
             .headers()
             .get_all(ACCEPT)
