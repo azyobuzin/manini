@@ -61,6 +61,15 @@ impl ServiceScaler {
             }
         }
     }
+
+    pub fn try_target_addr(&self) -> Option<IpAddr> {
+        let mut rx = self.service_status_rx.clone();
+        let status = rx.borrow_and_update();
+        match *status {
+            ServiceStatus::Healthy(addr) => Some(addr),
+            _ => None,
+        }
+    }
 }
 
 pub fn run_scaler(options: ServiceScalerOptions) -> ServiceScaler {

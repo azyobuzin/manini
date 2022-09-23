@@ -17,4 +17,5 @@ futures = { version = "0.3.24", default-features = false, features = ["std", "as
 http = "0.2.8"
 hyper = { version = "0.14", features = ["client", "server", "http1", "runtime"] }
 log = "0.4"
+memchr = "2.5.0"
 tokio = { version = "1", features = ["full"] }

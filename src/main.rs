@@ -2,10 +2,10 @@ use aws_sdk_ec2 as ec2;
 use aws_sdk_ecs as ecs;
 use clap::Parser;
 use hyper::server::conn::AddrStream;
-use hyper::service::make_service_fn;
+use hyper::service::{make_service_fn, service_fn};
 use hyper::Server;
 use log::{error, info};
-use manini::{ProxyService, ServiceScalerOptions};
+use manini::{proxy_service_fn, ProxyServiceOptions, ServiceScalerOptions};
 use std::convert::Infallible;
 use std::future::ready;
 use std::net::SocketAddr;
@@ -75,12 +75,17 @@ async fn async_main(cli: Cli) {
     };
     let http_client = hyper::Client::new();
     let svc = make_service_fn(|conn: &AddrStream| {
-        ready(Ok::<_, Infallible>(ProxyService::new(
-            service_scaler.clone(),
-            cli.target_port,
-            http_client.clone(),
-            conn.remote_addr().ip(),
-        )))
+        let service_options = ProxyServiceOptions {
+            service_scaler: service_scaler.clone(),
+            target_port: cli.target_port,
+            http_client: http_client.clone(),
+            remote_addr: conn.remote_addr().ip(),
+        };
+
+        ready(Ok::<_, Infallible>(service_fn(move |req| {
+            let service_options = service_options.clone();
+            async move { proxy_service_fn(req, &service_options).await }
+        })))
     });
     let server = Server::bind(&cli.bind).serve(svc);
 
