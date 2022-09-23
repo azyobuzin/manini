@@ -4,7 +4,7 @@ use clap::Parser;
 use hyper::server::conn::AddrStream;
 use hyper::service::make_service_fn;
 use hyper::Server;
-use log::error;
+use log::{error, info};
 use manini::{ProxyService, ServiceScalerOptions};
 use std::convert::Infallible;
 use std::future::ready;
@@ -82,18 +82,11 @@ async fn async_main(cli: Cli) {
             conn.remote_addr().ip(),
         )))
     });
-    let server = Server::bind(&cli.bind)
-        .serve(svc)
-        .with_graceful_shutdown(shutdown_signal());
+    let server = Server::bind(&cli.bind).serve(svc);
+
+    info!("Listening on {}", cli.bind);
 
     if let Err(e) = server.await {
         error!("{}", e);
     }
-}
-
-async fn shutdown_signal() {
-    // https://hyper.rs/guides/server/graceful-shutdown/
-    tokio::signal::ctrl_c()
-        .await
-        .expect("failed to install CTRL+C signal handler");
 }
