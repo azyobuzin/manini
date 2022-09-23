@@ -36,21 +36,25 @@ where
             .body(Body::empty())?);
     }
 
-    let target_addr = if is_get_html_request(&req) {
-        match timeout(Duration::from_secs(5), options.service_scaler.target_addr()).await {
-            Ok(x) => x,
-            Err(_) => {
-                // Return the waiting message for browsers
-                debug!("Return waiting message");
-                return Ok(Response::builder()
-                    .status(StatusCode::SERVICE_UNAVAILABLE)
-                    .header(RETRY_AFTER, "10")
-                    .header(CONTENT_TYPE, "text/html; charset=utf-8")
-                    .body(WAITING_RESPONSE.into())?);
+    let request_guard = {
+        let guard_fut = options.service_scaler.handle_request();
+        if is_get_html_request(&req) {
+            let timeout_result = timeout(Duration::from_secs(5), guard_fut).await;
+            match timeout_result {
+                Ok(x) => x?,
+                Err(_) => {
+                    // Return the waiting message for browsers
+                    debug!("Return waiting message");
+                    return Ok(Response::builder()
+                        .status(StatusCode::SERVICE_UNAVAILABLE)
+                        .header(RETRY_AFTER, "10")
+                        .header(CONTENT_TYPE, "text/html; charset=utf-8")
+                        .body(WAITING_RESPONSE.into())?);
+                }
             }
+        } else {
+            guard_fut.await?
         }
-    } else {
-        options.service_scaler.target_addr().await
     };
 
     // Set Host header
@@ -72,9 +76,9 @@ where
     // Rewrite URI
     let path_and_query = req.uri().path_and_query();
     *req.uri_mut() = {
-        let builder = Uri::builder()
-            .scheme(Scheme::HTTP)
-            .authority(SocketAddr::new(target_addr, options.target_port).to_string());
+        let builder = Uri::builder().scheme(Scheme::HTTP).authority(
+            SocketAddr::new(request_guard.target_addr(), options.target_port).to_string(),
+        );
         let builder = match path_and_query {
             Some(x) => builder.path_and_query(x.clone()),
             None => builder,
@@ -128,6 +132,9 @@ where
         if let Err(e) = tokio::io::copy_bidirectional(&mut res_upgraded, &mut req_upgraded).await {
             warn!("Error on upgraded connection of {}: {}", req_path, e);
         }
+
+        // If the connection upgraded, drop the guard after disconnection.
+        drop(request_guard)
     });
 
     Ok(res)

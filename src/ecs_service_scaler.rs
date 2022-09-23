@@ -1,16 +1,15 @@
-use anyhow::Context as _;
+use anyhow::{bail, Context as _};
 use aws_sdk_ec2 as ec2;
 use aws_sdk_ecs as ecs;
 use ecs::model::{DesiredStatus, HealthStatus};
 use futures::TryFutureExt;
 use log::{debug, error, info, warn};
-use std::future::{pending, Future};
+use std::convert::Infallible;
+use std::future::Future;
 use std::net::IpAddr;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::watch::Sender;
-use tokio::sync::{watch, Notify};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{sleep, sleep_until, Instant};
 use tokio::{select, spawn};
 
@@ -27,7 +26,13 @@ pub struct ServiceScalerOptions {
 #[derive(Clone, Debug)]
 pub struct ServiceScaler {
     service_status_rx: watch::Receiver<ServiceStatus>,
-    request_notify: Arc<Notify>,
+    notify_tx: mpsc::UnboundedSender<RequestNotification>,
+}
+
+#[derive(Debug)]
+pub struct RequestGuard {
+    addr: IpAddr,
+    _notify_tx: oneshot::Sender<Infallible>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +43,12 @@ enum ServiceStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+enum RequestNotification {
+    ReceiveRequest,
+    SentResponse,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum TaskStatus {
     Healthy,
     Unhealthy,
@@ -45,42 +56,55 @@ enum TaskStatus {
 }
 
 impl ServiceScaler {
-    pub fn target_addr(&self) -> impl Future<Output = IpAddr> + 'static {
-        self.request_notify.notify_one();
-
+    pub fn handle_request(
+        &self,
+    ) -> impl Future<Output = Result<RequestGuard, anyhow::Error>> + 'static {
+        let notify_tx = self.notify_tx.clone();
         let mut rx = self.service_status_rx.clone();
+
         async move {
+            if let Err(_) = notify_tx.send(RequestNotification::ReceiveRequest) {
+                bail!("The worker is dead")
+            }
+
+            let (oneshot_notify_tx, oneshot_notify_rx) = oneshot::channel();
+
+            spawn(async move {
+                // When oneshot_notify_tx is dropped, the request has completed.
+                oneshot_notify_rx.await.ok();
+                notify_tx.send(RequestNotification::SentResponse).ok();
+            });
+
             loop {
                 if let ServiceStatus::Healthy(addr) = *rx.borrow_and_update() {
-                    return addr;
+                    return Ok(RequestGuard {
+                        addr,
+                        _notify_tx: oneshot_notify_tx,
+                    });
                 }
 
-                if let Err(_) = rx.changed().await {
-                    return pending().await;
-                }
+                rx.changed().await.context("The worker is dead")?;
             }
         }
     }
+}
 
-    pub fn try_target_addr(&self) -> Option<IpAddr> {
-        let mut rx = self.service_status_rx.clone();
-        let status = rx.borrow_and_update();
-        match *status {
-            ServiceStatus::Healthy(addr) => Some(addr),
-            _ => None,
-        }
+impl RequestGuard {
+    pub fn target_addr(&self) -> IpAddr {
+        self.addr
     }
 }
 
 pub fn run_scaler(options: ServiceScalerOptions) -> ServiceScaler {
     let (service_status_tx, service_status_rx) = watch::channel(ServiceStatus::Unhealthy);
-    let request_notify: Arc<Notify> = Default::default();
+    let (notify_tx, mut notify_rx) = mpsc::unbounded_channel();
     let result = ServiceScaler {
         service_status_rx,
-        request_notify: request_notify.clone(),
+        notify_tx,
     };
 
     spawn(async move {
+        let mut alive_connections = 0isize;
         let mut next_health_check_time = Instant::now();
         let mut scale_down_time = None;
         const HEALTH_CHECK_PERIOD: Duration = Duration::from_secs(30);
@@ -96,31 +120,44 @@ pub fn run_scaler(options: ServiceScalerOptions) -> ServiceScaler {
             };
 
             select! {
-                _ = request_notify.notified() => {
-                    if *service_status_tx.borrow() == ServiceStatus::Unhealthy {
-                        let scale_result = scale_up_service(&options)
-                            .and_then(|()| wait_until_healthy(&options))
-                            .await;
-
-                        if let Err(x) = scale_result {
-                            error!("Failed to scale up the service: {}", x);
-                        } else {
-                            match get_service_ip(&options).await {
-                                Ok(x) => send_new_status(
-                                    &service_status_tx,
-                                    &match x {
-                                        Some(addr) => ServiceStatus::Healthy(addr),
-                                        None => ServiceStatus::NoIP
-                                    }
-                                ),
-                                Err(x) => error!("Failed to get IP address: {}", x),
-                            }
-                        }
-
-                        next_health_check_time = Instant::now() + HEALTH_CHECK_PERIOD;
+                msg = notify_rx.recv() => {
+                    match msg {
+                        Some(RequestNotification::ReceiveRequest) => alive_connections += 1,
+                        Some(RequestNotification::SentResponse) => alive_connections -= 1,
+                        None => return,
                     }
 
-                    scale_down_time = Some(Instant::now() + options.scale_down_period);
+                    debug!("alive_connections = {}", alive_connections);
+
+                    if alive_connections <= 0 {
+                        debug_assert!(alive_connections == 0);
+                        scale_down_time = Some(Instant::now() + options.scale_down_period);
+                    } else {
+                        scale_down_time = None;
+
+                        if *service_status_tx.borrow() == ServiceStatus::Unhealthy {
+                            let scale_result = scale_up_service(&options)
+                                .and_then(|()| wait_until_healthy(&options))
+                                .await;
+
+                            if let Err(x) = scale_result {
+                                error!("Failed to scale up the service: {}", x);
+                            } else {
+                                match get_service_ip(&options).await {
+                                    Ok(x) => send_new_status(
+                                        &service_status_tx,
+                                        &match x {
+                                            Some(addr) => ServiceStatus::Healthy(addr),
+                                            None => ServiceStatus::NoIP
+                                        }
+                                    ),
+                                    Err(x) => error!("Failed to get IP address: {}", x),
+                                }
+                            }
+
+                            next_health_check_time = Instant::now() + HEALTH_CHECK_PERIOD;
+                        }
+                    }
                 }
 
                 _ = sleep_until(target_time) => {
@@ -130,7 +167,7 @@ pub fn run_scaler(options: ServiceScalerOptions) -> ServiceScaler {
                             debug!("Starting health check");
 
                             let result = match get_task_status(&options).await {
-                                Ok(TaskStatus::Healthy) =>  match get_service_ip(&options).await {
+                                Ok(TaskStatus::Healthy) => match get_service_ip(&options).await {
                                     Ok(Some(addr)) => Ok(ServiceStatus::Healthy(addr)),
                                     Ok(None) => Ok(ServiceStatus::NoIP),
                                     Err(x) => Err(x)
@@ -144,8 +181,10 @@ pub fn run_scaler(options: ServiceScalerOptions) -> ServiceScaler {
                                 Err(x) => error!("Health check error: {}", x),
                             }
 
-                            if let (None, Ok(ServiceStatus::Healthy(_))) = (scale_down_time, result) {
-                                scale_down_time = Some(Instant::now() + options.scale_down_period);
+                            if let Ok(ServiceStatus::Healthy(_)) = result {
+                                if alive_connections <= 0 && scale_down_time.is_none() {
+                                    scale_down_time = Some(Instant::now() + options.scale_down_period);
+                                }
                             }
                         }
                         TimeoutAction::ScaleDown => {
@@ -339,7 +378,7 @@ async fn get_service_ip(options: &ServiceScalerOptions) -> anyhow::Result<Option
     Ok(Some(IpAddr::from_str(private_ip)?))
 }
 
-fn send_new_status(tx: &Sender<ServiceStatus>, status: &ServiceStatus) {
+fn send_new_status(tx: &watch::Sender<ServiceStatus>, status: &ServiceStatus) {
     let modified = tx.send_if_modified(|v| {
         if v != status {
             *v = status.clone();
