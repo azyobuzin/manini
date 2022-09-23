@@ -1,17 +1,20 @@
 use anyhow::bail;
 use http::header::{ACCEPT, CONTENT_TYPE, HOST, RETRY_AFTER, UPGRADE};
 use http::uri::Scheme;
-use http::{HeaderValue, Method, StatusCode, Uri, Version};
+use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, Version};
+use hyper::body::{HttpBody, SizeHint};
 use hyper::client::connect::Connect;
 use hyper::{Body, Request, Response};
 use log::{debug, error, info, warn};
 use memchr::memmem;
 use std::convert::TryFrom;
 use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::time::timeout;
 
-use crate::ServiceScaler;
+use crate::{RequestGuard, ServiceScaler};
 
 #[derive(Debug, Clone)]
 pub struct ProxyServiceOptions<C> {
@@ -21,10 +24,44 @@ pub struct ProxyServiceOptions<C> {
     pub remote_addr: IpAddr,
 }
 
+#[derive(Debug)]
+pub struct WrappedBody {
+    inner: Body,
+    // Drop the guard after sending response
+    _request_guard: Option<RequestGuard>,
+}
+
+impl HttpBody for WrappedBody {
+    type Data = <Body as HttpBody>::Data;
+    type Error = <Body as HttpBody>::Error;
+
+    fn poll_data(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context,
+    ) -> Poll<Option<Result<Self::Data, Self::Error>>> {
+        Pin::new(&mut self.inner).poll_data(cx)
+    }
+
+    fn poll_trailers(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context,
+    ) -> Poll<Result<Option<HeaderMap<HeaderValue>>, Self::Error>> {
+        Pin::new(&mut self.inner).poll_trailers(cx)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
+}
+
 pub async fn proxy_service_fn<C>(
     mut req: Request<Body>,
     options: &ProxyServiceOptions<C>,
-) -> anyhow::Result<Response<Body>>
+) -> anyhow::Result<Response<WrappedBody>>
 where
     C: Connect + Clone + Send + Sync + 'static,
 {
@@ -33,7 +70,7 @@ where
         info!("Unsupported request {} {}", req.method(), req.uri().path());
         return Ok(Response::builder()
             .status(StatusCode::METHOD_NOT_ALLOWED)
-            .body(Body::empty())?);
+            .body(wrap_body(Body::empty()))?);
     }
 
     let request_guard = {
@@ -49,7 +86,7 @@ where
                         .status(StatusCode::SERVICE_UNAVAILABLE)
                         .header(RETRY_AFTER, "10")
                         .header(CONTENT_TYPE, "text/html; charset=utf-8")
-                        .body(WAITING_RESPONSE.into())?);
+                        .body(wrap_body(WAITING_RESPONSE.into()))?);
                 }
             }
         } else {
@@ -91,7 +128,10 @@ where
 
     if !req.headers().contains_key(UPGRADE) {
         debug!("Send request {} {}", req.method(), req.uri());
-        return Ok(options.http_client.request(req).await?);
+        return Ok(wrap_response(
+            options.http_client.request(req).await?,
+            Some(request_guard),
+        ));
     }
 
     // The request is an upgrade (WebSocket) request
@@ -114,7 +154,7 @@ where
     let mut res = options.http_client.request(req_to_send).await?;
 
     if res.status() != StatusCode::SWITCHING_PROTOCOLS {
-        return Ok(res);
+        return Ok(wrap_response(res, Some(request_guard)));
     }
 
     // Connect the streams
@@ -137,7 +177,7 @@ where
         drop(request_guard)
     });
 
-    Ok(res)
+    Ok(wrap_response(res, None))
 }
 
 fn is_supported_method(method: &Method) -> bool {
@@ -159,6 +199,27 @@ fn is_get_html_request<B>(req: &Request<B>) -> bool {
             .get_all(ACCEPT)
             .iter()
             .any(|v| memmem::find(&v.as_bytes().to_ascii_lowercase(), b"text/html").is_some())
+}
+
+fn wrap_body(body: Body) -> WrappedBody {
+    WrappedBody {
+        inner: body,
+        _request_guard: None,
+    }
+}
+
+fn wrap_response(
+    res: Response<Body>,
+    request_guard: Option<RequestGuard>,
+) -> Response<WrappedBody> {
+    let (parts, body) = res.into_parts();
+    Response::from_parts(
+        parts,
+        WrappedBody {
+            inner: body,
+            _request_guard: request_guard,
+        },
+    )
 }
 
 const WAITING_RESPONSE: &'static [u8] = include_bytes!("waiting.html");
