@@ -14,7 +14,7 @@ aws-config = "0.48.0"
 aws-sdk-ec2 = "0.18.0"
 aws-sdk-ecs = "0.18.0"
 clap = { version = "3.2.22", features = ["derive", "env"] }
-env_logger = "0.9.0"
+env_logger = "0.9.1"
 futures = { version = "0.3.24", default-features = false, features = ["std", "async-await"] }
 http = "0.2.8"
 hyper = { version = "0.14", features = ["client", "server", "http1", "runtime"] }
