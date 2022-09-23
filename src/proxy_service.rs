@@ -1,12 +1,12 @@
 use futures::future::BoxFuture;
-use futures::TryFutureExt;
+use futures::{FutureExt, TryFutureExt};
 use http::header::{HOST, UPGRADE};
 use http::uri::Scheme;
 use http::{HeaderValue, Method, StatusCode, Uri, Version};
 use hyper::client::connect::Connect;
 use hyper::service::Service;
 use hyper::{Body, Request, Response};
-use log::{error, warn};
+use log::{debug, error, warn};
 use std::convert::TryFrom;
 use std::future::ready;
 use std::net::{IpAddr, SocketAddr};
@@ -16,6 +16,7 @@ pub struct ProxyService<C> {
     service_scaler: super::ServiceScaler,
     target_port: u16,
     target_addr: Option<IpAddr>,
+    target_addr_future: Option<BoxFuture<'static, IpAddr>>,
     http_client: hyper::Client<C>,
     remote_addr: IpAddr,
 }
@@ -31,6 +32,7 @@ impl<C> ProxyService<C> {
             service_scaler,
             target_port,
             target_addr: None,
+            target_addr_future: None,
             http_client,
             remote_addr,
         }
@@ -46,15 +48,21 @@ where
     type Future = BoxFuture<'static, anyhow::Result<Self::Response>>;
 
     fn poll_ready(&mut self, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
-        match self.service_scaler.poll_target_addr(cx) {
-            Poll::Ready(addr) => {
-                self.target_addr = Some(addr);
+        if let Some(_) = self.target_addr {
+            return Poll::Ready(Ok(()));
+        }
+
+        if self.target_addr_future.is_none() {
+            self.target_addr_future = Some(self.service_scaler.target_addr().boxed())
+        }
+
+        // FIXME: 同じ接続については同じ Service が再使用されるので、スケールダウンしても接続し続けてしまう
+        match self.target_addr_future.as_mut().unwrap().poll_unpin(cx) {
+            Poll::Ready(x) => {
+                self.target_addr = Some(x);
                 Poll::Ready(Ok(()))
             }
-            Poll::Pending => {
-                self.target_addr = None;
-                Poll::Pending
-            }
+            Poll::Pending => Poll::Pending,
         }
     }
 
@@ -105,12 +113,15 @@ where
         };
 
         if !req.headers().contains_key(UPGRADE) {
+            debug!("Send request {} {}", req.method(), req.uri());
             return Box::pin(self.http_client.request(req).map_err(anyhow::Error::from));
         }
 
         // The request is an upgrade (WebSocket) request
         let http_client = self.http_client.clone();
         return Box::pin(async move {
+            debug!("Send upgrade request {} {}", req.method(), req.uri());
+
             // Copy the request
             let mut req_to_send = Request::builder()
                 .method(req.method())
