@@ -9,16 +9,17 @@ use manini::{proxy_service_fn, ProxyServiceOptions, ServiceScalerOptions};
 use std::convert::Infallible;
 use std::future::ready;
 use std::net::SocketAddr;
+use std::process::ExitCode;
 use std::time::Duration;
 
-fn main() {
+fn main() -> ExitCode {
     env_logger::init();
     let cli = Cli::parse();
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap()
-        .block_on(async { async_main(cli).await })
+        .block_on(async_main(cli))
 }
 
 #[derive(Parser)]
@@ -61,7 +62,7 @@ struct Cli {
     bind: SocketAddr,
 }
 
-async fn async_main(cli: Cli) {
+async fn async_main(cli: Cli) -> ExitCode {
     let service_scaler = {
         let config = aws_config::load_from_env().await;
         manini::run_scaler(ServiceScalerOptions {
@@ -91,7 +92,11 @@ async fn async_main(cli: Cli) {
 
     info!("Listening on {}", cli.bind);
 
-    if let Err(e) = server.await {
-        error!("{}", e);
+    match server.await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            error!("{}", e);
+            ExitCode::FAILURE
+        }
     }
 }
