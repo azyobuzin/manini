@@ -1,6 +1,7 @@
 use aws_sdk_ec2 as ec2;
 use aws_sdk_ecs as ecs;
 use clap::Parser;
+use hyper::client::HttpConnector;
 use hyper::server::conn::AddrStream;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::Server;
@@ -74,7 +75,14 @@ async fn async_main(cli: Cli) -> ExitCode {
             scale_down_period: Duration::from_secs(cli.scale_down_period),
         })
     };
-    let http_client = hyper::Client::new();
+
+    let http_client = {
+        let mut connector = HttpConnector::new();
+        connector.set_keepalive(Some(Duration::from_secs(90))); // hyper::Client's default
+        connector.set_connect_timeout(Some(Duration::from_secs(10)));
+        hyper::Client::builder().build(connector)
+    };
+
     let svc = make_service_fn(|conn: &AddrStream| {
         let service_options = ProxyServiceOptions {
             service_scaler: service_scaler.clone(),

@@ -127,11 +127,19 @@ where
     };
 
     if !req.headers().contains_key(UPGRADE) {
-        debug!("Send request {} {}", req.method(), req.uri());
-        return Ok(wrap_response(
-            options.http_client.request(req).await?,
-            Some(request_guard),
-        ));
+        let request_method = req.method().clone();
+        let request_uri = req.uri().clone();
+        debug!("Send request {} {}", request_method, request_uri);
+
+        let res = match options.http_client.request(req).await {
+            Ok(x) => x,
+            Err(e) => {
+                error!("Error on request {} {}: {}", request_method, request_uri, e);
+                bad_gateway_response(&e)
+            }
+        };
+
+        return Ok(wrap_response(res, Some(request_guard)));
     }
 
     // The request is an upgrade (WebSocket) request
@@ -151,7 +159,13 @@ where
     }
     let req_to_send = req_to_send.body(Body::empty())?;
 
-    let mut res = options.http_client.request(req_to_send).await?;
+    let mut res = match options.http_client.request(req_to_send).await {
+        Ok(x) => x,
+        Err(e) => {
+            error!("Error on request {} {}: {}", req.method(), req.uri(), e);
+            return Ok(wrap_response(bad_gateway_response(&e), Some(request_guard)));
+        }
+    };
 
     if res.status() != StatusCode::SWITCHING_PROTOCOLS {
         return Ok(wrap_response(res, Some(request_guard)));
@@ -220,6 +234,17 @@ fn wrap_response(
             _request_guard: request_guard,
         },
     )
+}
+
+fn bad_gateway_response(err: &hyper::Error) -> Response<Body> {
+    Response::builder()
+        .status(if err.is_timeout() {
+            StatusCode::GATEWAY_TIMEOUT
+        } else {
+            StatusCode::BAD_GATEWAY
+        })
+        .body(Body::empty())
+        .unwrap()
 }
 
 const WAITING_RESPONSE: &'static [u8] = include_bytes!("waiting.html");
