@@ -1,4 +1,3 @@
-use anyhow::bail;
 use http::header::{ACCEPT, CONTENT_TYPE, HOST, RETRY_AFTER, UPGRADE};
 use http::uri::Scheme;
 use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, Version};
@@ -7,7 +6,6 @@ use hyper::client::connect::Connect;
 use hyper::{Body, Request, Response};
 use log::{debug, error, info, warn};
 use memchr::memmem;
-use std::convert::TryFrom;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -97,18 +95,13 @@ where
     // Set Host header
     if !req.headers().contains_key(HOST) {
         if let Some(x) = req.uri().host() {
-            match HeaderValue::try_from(x) {
-                Ok(hv) => req.headers_mut().insert(HOST, hv),
-                Err(e) => bail!(e),
-            };
+            let hv: HeaderValue = x.parse()?;
+            req.headers_mut().insert(HOST, hv);
         }
     }
 
     // Set X-Forwarded-For header
-    match HeaderValue::try_from(options.remote_addr.to_string()) {
-        Ok(hv) => req.headers_mut().append("X-Forwarded-For", hv),
-        Err(e) => bail!(e),
-    };
+    req.headers_mut().append("X-Forwarded-For", options.remote_addr.to_string().parse()?);
 
     // Rewrite URI
     let path_and_query = req.uri().path_and_query();
@@ -120,10 +113,7 @@ where
             Some(x) => builder.path_and_query(x.clone()),
             None => builder,
         };
-        match builder.build() {
-            Ok(x) => x,
-            Err(e) => bail!(e),
-        }
+        builder.build()?
     };
 
     if !req.headers().contains_key(UPGRADE) {
