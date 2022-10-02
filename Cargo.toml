@@ -13,14 +13,14 @@ anyhow = "1"
 aws-config = "0.49.0"
 aws-sdk-ec2 = "0.19.0"
 aws-sdk-ecs = "0.19.0"
-clap = { version = "3.2.22", features = ["derive", "env"] }
+clap = { version = "4.0.8", features = ["derive", "env"] }
 env_logger = "0.9.1"
 futures = { version = "0.3.24", default-features = false, features = ["std", "async-await"] }
 http = "0.2.8"
 hyper = { version = "0.14", features = ["client", "server", "http1", "runtime"] }
 log = "0.4"
 memchr = "2.5.0"
-tokio = { version = "1", features = ["rt", "io-util", "net", "time", "macros", "sync"] }
+tokio = { version = "1.21", features = ["rt", "io-util", "net", "time", "macros", "sync"] }
 
 [profile.release]
 lto = true

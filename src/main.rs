@@ -108,3 +108,9 @@ async fn async_main(cli: Cli) -> ExitCode {
         }
     }
 }
+
+#[test]
+fn verify_cli() {
+    use clap::CommandFactory;
+    Cli::command().debug_assert()
+}
