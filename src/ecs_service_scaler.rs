@@ -1,7 +1,7 @@
 use anyhow::{bail, Context as _};
 use aws_sdk_ec2 as ec2;
 use aws_sdk_ecs as ecs;
-use ecs::model::{DesiredStatus, HealthStatus};
+use ecs::types::{DesiredStatus, HealthStatus};
 use futures::TryFutureExt;
 use log::{debug, error, info, warn};
 use std::convert::Infallible;
@@ -223,13 +223,11 @@ async fn scale_up_service(options: &ServiceScalerOptions) -> anyhow::Result<()> 
             .send()
             .await
             .context("Failed to get service status")?;
-        let service = services_res
-            .services()
-            .and_then(|services| match services {
-                &[ref x] => Some(x),
-                _ => None,
-            })
-            .context("The specified service is not found")?;
+        let service = match services_res.services() {
+            [ref x] => x,
+            [] => bail!("The specified service is not found"),
+            _ => bail!("Multiple services are found"),
+        };
         service.desired_count()
     };
 
@@ -272,8 +270,8 @@ async fn get_task_status(options: &ServiceScalerOptions) -> anyhow::Result<TaskS
             .desired_status(DesiredStatus::Running)
             .send()
             .await?;
-        match list_tasks_res.task_arns() {
-            Some(x) if !x.is_empty() => x.iter().map(|x| x.clone()).collect(),
+        match list_tasks_res.task_arns {
+            Some(x) if !x.is_empty() => x,
             _ => return Ok(TaskStatus::NoTask),
         }
     };
@@ -288,8 +286,7 @@ async fn get_task_status(options: &ServiceScalerOptions) -> anyhow::Result<TaskS
 
     if tasks_res
         .tasks()
-        .into_iter()
-        .flat_map(|x| x.iter())
+        .iter()
         .any(|task| matches!(task.health_status(), Some(HealthStatus::Healthy)))
     {
         Ok(TaskStatus::Healthy)
@@ -308,8 +305,8 @@ async fn get_service_ip(options: &ServiceScalerOptions) -> anyhow::Result<Option
             .desired_status(DesiredStatus::Running)
             .send()
             .await?;
-        match list_tasks_res.task_arns() {
-            Some(x) if !x.is_empty() => x.iter().map(|x| x.clone()).collect(),
+        match list_tasks_res.task_arns {
+            Some(x) if !x.is_empty() => x,
             _ => return Ok(None),
         }
     };
@@ -325,10 +322,8 @@ async fn get_service_ip(options: &ServiceScalerOptions) -> anyhow::Result<Option
     // Get the ENI attached to the task
     let attachment = match tasks_res
         .tasks()
-        .into_iter()
-        .flat_map(|tasks| tasks.iter())
-        .flat_map(|task| task.attachments().into_iter())
-        .flat_map(|attachments| attachments.iter())
+        .iter()
+        .flat_map(|task| task.attachments().iter())
         .find(|attachment| {
             matches!(
                 (attachment.r#type(), attachment.status()),
@@ -342,8 +337,7 @@ async fn get_service_ip(options: &ServiceScalerOptions) -> anyhow::Result<Option
     if options.use_public_ip {
         let eni_id = attachment
             .details()
-            .into_iter()
-            .flat_map(|x| x.iter())
+            .iter()
             .find_map(|x| match (x.name(), x.value()) {
                 (Some("networkInterfaceId"), Some(id)) => Some(id),
                 _ => None,
@@ -357,8 +351,7 @@ async fn get_service_ip(options: &ServiceScalerOptions) -> anyhow::Result<Option
             .await?;
         let public_ip = enis_res
             .network_interfaces()
-            .into_iter()
-            .flat_map(|x| x.iter())
+            .iter()
             .flat_map(|x| x.association().into_iter())
             .flat_map(|x| x.public_ip().into_iter())
             .nth(0)
@@ -368,8 +361,7 @@ async fn get_service_ip(options: &ServiceScalerOptions) -> anyhow::Result<Option
 
     let private_ip = attachment
         .details()
-        .into_iter()
-        .flat_map(|x| x.iter())
+        .iter()
         .find_map(|x| match (x.name(), x.value()) {
             (Some("privateIPv4Address"), Some(private_ip)) => Some(private_ip),
             _ => None,

@@ -101,7 +101,8 @@ where
     }
 
     // Set X-Forwarded-For header
-    req.headers_mut().append("X-Forwarded-For", options.remote_addr.to_string().parse()?);
+    req.headers_mut()
+        .append("X-Forwarded-For", options.remote_addr.to_string().parse()?);
 
     // Rewrite URI
     let path_and_query = req.uri().path_and_query();
