@@ -1,9 +1,9 @@
-FROM rust:1.63-bullseye AS builder
+FROM rust:1.90-bookworm AS builder
 WORKDIR /src
 COPY . .
 RUN cargo build --bin manini --release --locked
 
-FROM gcr.io/distroless/cc-debian11:nonroot
+FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=builder /src/target/release/manini /usr/local/bin/manini
 CMD [ "/usr/local/bin/manini" ]
 
