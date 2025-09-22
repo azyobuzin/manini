@@ -71,7 +71,7 @@ services:
 | --cluster | MANINI_CLUSTER | クラスタ名。省略するとデフォルトクラスタ |
 | --service | MANINI_SERVICE | サービス名 |
 | --target-port | MANINI_TARGET_PORT | コンテナ側のポート番号 |
-| --public-ip | MANINI_PUBLIC_IP | パブリックIPアドレスを使用するか。指定しない場合はプライベートIPアドレスを使用する |
+| --ip | MANINI_IP | 使用するIPアドレスの種類。private, public, v6 から選択。省略時は private |
 | --scale_down_period | MANINI_SCALE_DOWN_PERIOD | 何秒間アクセスがなかったらサービスを停止するか。デフォルト 300 秒 |
 | --bind | MANINI_BIND | プロキシがリッスンするアドレス。デフォルト 0.0.0.0:3000 |
 | | RUST_LOG | ログ設定。設定方法は [env_logger のドキュメント](https://docs.rs/env_logger/0.9.1/env_logger/index.html#enabling-logging)を参照 |

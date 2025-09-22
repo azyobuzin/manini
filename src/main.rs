@@ -6,7 +6,7 @@ use hyper::client::HttpConnector;
 use hyper::server::conn::AddrStream;
 use hyper::service::{make_service_fn, service_fn};
 use log::{error, info};
-use manini::{ProxyServiceOptions, ServiceScalerOptions, proxy_service_fn};
+use manini::{ProxyServiceOptions, ServiceIp, ServiceScalerOptions, proxy_service_fn};
 use std::convert::Infallible;
 use std::future::ready;
 use std::net::SocketAddr;
@@ -38,9 +38,9 @@ struct Cli {
     #[clap(long, env = "MANINI_TARGET_PORT", value_name = "PORT", value_parser)]
     target_port: u16,
 
-    /// Whether sends requests to the public IP address
-    #[clap(long, env = "MANINI_PUBLIC_IP")]
-    public_ip: bool,
+    /// Which service IP address to target (private, public, or v6)
+    #[clap(long, env = "MANINI_IP", value_enum, default_value_t = ServiceIp::Private)]
+    ip: ServiceIp,
 
     /// The container will stop if no requests are received for the specified time
     #[clap(
@@ -71,7 +71,7 @@ async fn async_main(cli: Cli) -> ExitCode {
             ec2_client: ec2::Client::new(&config),
             cluster_name: cli.cluster,
             service_name: cli.service,
-            use_public_ip: cli.public_ip,
+            ip_selection: cli.ip,
             scale_down_period: Duration::from_secs(cli.scale_down_period),
         })
     };

@@ -1,6 +1,7 @@
 use anyhow::{Context as _, bail};
 use aws_sdk_ec2 as ec2;
 use aws_sdk_ecs as ecs;
+use clap::ValueEnum;
 use ecs::types::{DesiredStatus, HealthStatus};
 use futures::TryFutureExt;
 use log::{debug, error, info, warn};
@@ -19,8 +20,16 @@ pub struct ServiceScalerOptions {
     pub ec2_client: ec2::Client,
     pub cluster_name: Option<String>,
     pub service_name: String,
-    pub use_public_ip: bool,
+    pub ip_selection: ServiceIp,
     pub scale_down_period: Duration,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "lowercase")]
+pub enum ServiceIp {
+    Private,
+    Public,
+    V6,
 }
 
 #[derive(Clone, Debug)]
@@ -334,40 +343,69 @@ async fn get_service_ip(options: &ServiceScalerOptions) -> anyhow::Result<Option
         None => return Ok(None),
     };
 
-    if options.use_public_ip {
-        let eni_id = attachment
-            .details()
-            .iter()
-            .find_map(|x| match (x.name(), x.value()) {
-                (Some("networkInterfaceId"), Some(id)) => Some(id),
-                _ => None,
-            })
-            .context("Unable to get networkInterfaceId")?;
-        let enis_res = options
-            .ec2_client
-            .describe_network_interfaces()
-            .network_interface_ids(eni_id)
-            .send()
-            .await?;
-        let public_ip = enis_res
-            .network_interfaces()
-            .iter()
-            .flat_map(|x| x.association().into_iter())
-            .flat_map(|x| x.public_ip().into_iter())
-            .nth(0)
-            .context("No public IP is attached")?;
-        return Ok(Some(IpAddr::from_str(public_ip)?));
+    match options.ip_selection {
+        ServiceIp::Private => {
+            let private_ip = attachment
+                .details()
+                .iter()
+                .find_map(|detail| match (detail.name(), detail.value()) {
+                    (Some("privateIPv4Address"), Some(private_ip)) => Some(private_ip),
+                    _ => None,
+                })
+                .context("Unable to get privateIPv4Address")?;
+            Ok(Some(IpAddr::from_str(private_ip)?))
+        }
+        ServiceIp::Public => {
+            let network_interfaces =
+                get_network_interface_from_attachment(&options.ec2_client, attachment).await?;
+            let public_ip = network_interfaces
+                .iter()
+                .flat_map(|iface| iface.association().into_iter())
+                .flat_map(|association| association.public_ip().into_iter())
+                .next()
+                .context("No public IP is attached")?;
+            Ok(Some(IpAddr::from_str(public_ip)?))
+        }
+        ServiceIp::V6 => {
+            let network_interfaces =
+                get_network_interface_from_attachment(&options.ec2_client, attachment).await?;
+            let ipv6 = network_interfaces
+                .iter()
+                .find_map(|iface| {
+                    iface
+                        .ipv6_addresses()
+                        .iter()
+                        .find_map(|address| address.ipv6_address())
+                })
+                .context("No IPv6 address is attached")?;
+            Ok(Some(IpAddr::from_str(ipv6)?))
+        }
     }
+}
 
-    let private_ip = attachment
+async fn get_network_interface_from_attachment(
+    client: &ec2::Client,
+    attachment: &ecs::types::Attachment,
+) -> anyhow::Result<Vec<ec2::types::NetworkInterface>> {
+    let eni_id = attachment
         .details()
         .iter()
-        .find_map(|x| match (x.name(), x.value()) {
-            (Some("privateIPv4Address"), Some(private_ip)) => Some(private_ip),
+        .find_map(|detail| match (detail.name(), detail.value()) {
+            (Some("networkInterfaceId"), Some(id)) => Some(id),
             _ => None,
         })
-        .context("Unable to get privateIPv4Address")?;
-    Ok(Some(IpAddr::from_str(private_ip)?))
+        .context("Unable to get networkInterfaceId")?;
+
+    let enis_res = client
+        .describe_network_interfaces()
+        .network_interface_ids(eni_id)
+        .send()
+        .await?;
+
+    match enis_res.network_interfaces {
+        Some(interfaces) if !interfaces.is_empty() => Ok(interfaces),
+        _ => bail!("No network interfaces found for the given ID"),
+    }
 }
 
 fn send_new_status(tx: &watch::Sender<ServiceStatus>, status: &ServiceStatus) {
