@@ -1,17 +1,19 @@
 use aws_sdk_ec2 as ec2;
 use aws_sdk_ecs as ecs;
 use clap::Parser;
-use hyper::Server;
-use hyper::client::HttpConnector;
-use hyper::server::conn::AddrStream;
-use hyper::service::{make_service_fn, service_fn};
+use hyper::service::service_fn;
+use hyper_util::client::legacy::Client;
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto;
 use log::{error, info};
-use manini::{ProxyServiceOptions, ServiceIp, ServiceScalerOptions, proxy_service_fn};
-use std::convert::Infallible;
-use std::future::ready;
+use manini::{
+    ProxyHttpBody, ProxyServiceOptions, ServiceIp, ServiceScalerOptions, proxy_service_fn,
+};
 use std::net::SocketAddr;
 use std::process::ExitCode;
 use std::time::Duration;
+use tokio::net::TcpListener;
 
 fn main() -> ExitCode {
     env_logger::init();
@@ -64,48 +66,76 @@ struct Cli {
 }
 
 async fn async_main(cli: Cli) -> ExitCode {
+    let Cli {
+        cluster,
+        service,
+        target_port,
+        ip,
+        scale_down_period,
+        bind,
+    } = cli;
+
     let service_scaler = {
         let config = aws_config::load_from_env().await;
         manini::run_scaler(ServiceScalerOptions {
             ecs_client: ecs::Client::new(&config),
             ec2_client: ec2::Client::new(&config),
-            cluster_name: cli.cluster,
-            service_name: cli.service,
-            ip_selection: cli.ip,
-            scale_down_period: Duration::from_secs(cli.scale_down_period),
+            cluster_name: cluster,
+            service_name: service,
+            ip_selection: ip,
+            scale_down_period: Duration::from_secs(scale_down_period),
         })
     };
 
-    let http_client = {
+    let http_client: Client<_, ProxyHttpBody> = {
         let mut connector = HttpConnector::new();
-        connector.set_keepalive(Some(Duration::from_secs(90))); // hyper::Client's default
+        connector.set_keepalive(Some(Duration::from_secs(90)));
         connector.set_connect_timeout(Some(Duration::from_secs(10)));
-        hyper::Client::builder().build(connector)
+        Client::builder(TokioExecutor::new()).build(connector)
     };
 
-    let svc = make_service_fn(|conn: &AddrStream| {
-        let service_options = ProxyServiceOptions {
-            service_scaler: service_scaler.clone(),
-            target_port: cli.target_port,
-            http_client: http_client.clone(),
-            remote_addr: conn.remote_addr().ip(),
+    let listener = match TcpListener::bind(bind).await {
+        Ok(listener) => listener,
+        Err(e) => {
+            error!("Failed to bind to {}: {}", bind, e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    info!("Listening on {}", bind);
+
+    let connection_builder = auto::Builder::new(TokioExecutor::new());
+
+    loop {
+        let (stream, addr) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(e) => {
+                error!("Accept error: {}", e);
+                continue;
+            }
         };
 
-        ready(Ok::<_, Infallible>(service_fn(move |req| {
-            let service_options = service_options.clone();
-            async move { proxy_service_fn(req, &service_options).await }
-        })))
-    });
-    let server = Server::bind(&cli.bind).serve(svc);
+        let service_options = ProxyServiceOptions {
+            service_scaler: service_scaler.clone(),
+            target_port,
+            http_client: http_client.clone(),
+            remote_addr: addr.ip(),
+        };
 
-    info!("Listening on {}", cli.bind);
+        let builder = connection_builder.clone();
 
-    match server.await {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            error!("{}", e);
-            ExitCode::FAILURE
-        }
+        tokio::spawn(async move {
+            let service = service_fn(move |req| {
+                let service_options = service_options.clone();
+                async move { proxy_service_fn(req, &service_options).await }
+            });
+
+            let io = TokioIo::new(stream);
+
+            if let Err(err) = builder.serve_connection_with_upgrades(io, service).await {
+                error!("Error serving connection from {}: {}", addr, err);
+            }
+        });
     }
 }
 
