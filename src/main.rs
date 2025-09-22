@@ -1,12 +1,12 @@
 use aws_sdk_ec2 as ec2;
 use aws_sdk_ecs as ecs;
 use clap::Parser;
+use hyper::Server;
 use hyper::client::HttpConnector;
 use hyper::server::conn::AddrStream;
 use hyper::service::{make_service_fn, service_fn};
-use hyper::Server;
 use log::{error, info};
-use manini::{proxy_service_fn, ProxyServiceOptions, ServiceScalerOptions};
+use manini::{ProxyServiceOptions, ServiceScalerOptions, proxy_service_fn};
 use std::convert::Infallible;
 use std::future::ready;
 use std::net::SocketAddr;

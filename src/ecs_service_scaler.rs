@@ -1,4 +1,4 @@
-use anyhow::{bail, Context as _};
+use anyhow::{Context as _, bail};
 use aws_sdk_ec2 as ec2;
 use aws_sdk_ecs as ecs;
 use ecs::types::{DesiredStatus, HealthStatus};
@@ -10,7 +10,7 @@ use std::net::IpAddr;
 use std::str::FromStr;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
-use tokio::time::{sleep, sleep_until, Instant};
+use tokio::time::{Instant, sleep, sleep_until};
 use tokio::{select, spawn};
 
 #[derive(Clone, Debug)]
@@ -224,7 +224,7 @@ async fn scale_up_service(options: &ServiceScalerOptions) -> anyhow::Result<()> 
             .await
             .context("Failed to get service status")?;
         let service = match services_res.services() {
-            [ref x] => x,
+            [x] => x,
             [] => bail!("The specified service is not found"),
             _ => bail!("Multiple services are found"),
         };
