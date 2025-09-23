@@ -1,17 +1,19 @@
 use aws_sdk_ec2 as ec2;
 use aws_sdk_ecs as ecs;
 use clap::Parser;
-use hyper::Server;
-use hyper::client::HttpConnector;
-use hyper::server::conn::AddrStream;
-use hyper::service::{make_service_fn, service_fn};
+use hyper::service::service_fn;
+use hyper_util::client::legacy::Client;
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto;
 use log::{error, info};
-use manini::{ProxyServiceOptions, ServiceIp, ServiceScalerOptions, proxy_service_fn};
-use std::convert::Infallible;
-use std::future::ready;
+use manini::{
+    ProxyHttpBody, ProxyServiceOptions, ServiceIp, ServiceScalerOptions, proxy_service_fn,
+};
 use std::net::SocketAddr;
 use std::process::ExitCode;
 use std::time::Duration;
+use tokio::net::TcpListener;
 
 fn main() -> ExitCode {
     env_logger::init();
@@ -76,36 +78,55 @@ async fn async_main(cli: Cli) -> ExitCode {
         })
     };
 
-    let http_client = {
+    let http_client: Client<_, ProxyHttpBody> = {
         let mut connector = HttpConnector::new();
-        connector.set_keepalive(Some(Duration::from_secs(90))); // hyper::Client's default
+        connector.set_keepalive(Some(Duration::from_secs(90)));
         connector.set_connect_timeout(Some(Duration::from_secs(10)));
-        hyper::Client::builder().build(connector)
+        Client::builder(TokioExecutor::new()).build(connector)
     };
 
-    let svc = make_service_fn(|conn: &AddrStream| {
+    let listener = match TcpListener::bind(cli.bind).await {
+        Ok(listener) => listener,
+        Err(e) => {
+            error!("Failed to bind to {}: {}", cli.bind, e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    info!("Listening on {}", cli.bind);
+
+    let connection_builder = auto::Builder::new(TokioExecutor::new());
+
+    loop {
+        let (stream, addr) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(e) => {
+                error!("Accept error: {}", e);
+                continue;
+            }
+        };
+
         let service_options = ProxyServiceOptions {
             service_scaler: service_scaler.clone(),
             target_port: cli.target_port,
             http_client: http_client.clone(),
-            remote_addr: conn.remote_addr().ip(),
+            remote_addr: addr.ip(),
         };
 
-        ready(Ok::<_, Infallible>(service_fn(move |req| {
-            let service_options = service_options.clone();
-            async move { proxy_service_fn(req, &service_options).await }
-        })))
-    });
-    let server = Server::bind(&cli.bind).serve(svc);
+        let builder = connection_builder.clone();
 
-    info!("Listening on {}", cli.bind);
+        tokio::spawn(async move {
+            let service = service_fn(move |req| {
+                let service_options = service_options.clone();
+                async move { proxy_service_fn(req, &service_options).await }
+            });
 
-    match server.await {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            error!("{}", e);
-            ExitCode::FAILURE
-        }
+            let io = TokioIo::new(stream);
+
+            if let Err(err) = builder.serve_connection_with_upgrades(io, service).await {
+                error!("Error serving connection from {}: {}", addr, err);
+            }
+        });
     }
 }
 
