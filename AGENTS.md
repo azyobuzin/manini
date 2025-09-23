@@ -12,6 +12,8 @@ We target Rust 2024 with 4-space indentation. Follow idiomatic `snake_case` for 
 ## Testing Guidelines
 Use `cargo test` for unit coverage and prefer focused modules over broad integration tests. Asynchronous code should rely on `#[tokio::test]`. When touching scaling logic, add regressions around idle timers and ECS state transitions. Capture AWS interactions behind traits so they can be mocked with lightweight stubs; reuse existing patterns in `src/lib.rs`. Document notable test scenarios in PR descriptions when they exercise edge cases.
 
+Always set a timeout when running tests, e.g., `timeout 120 cargo test`.
+
 ## Commit & Pull Request Guidelines
 The history follows Conventional Commits (`feat`, `refactor`, `chore`, etc.)—continue the pattern with imperative summaries under 72 characters. Each PR should describe the motivation, outline testing performed, and link related issues or runbooks. Include configuration updates (environment variables, HTML copy) in the same change with context. Request review when CI is green and attach screenshots or curl transcripts if the waiting page or proxy behaviour changed.
 
