@@ -3,7 +3,7 @@ use aws_sdk_ec2 as ec2;
 use aws_sdk_ecs as ecs;
 use clap::ValueEnum;
 use ecs::types::{DesiredStatus, HealthStatus};
-use futures::TryFutureExt;
+use futures_util::TryFutureExt;
 use log::{debug, error, info, warn};
 use std::convert::Infallible;
 use std::future::Future;
