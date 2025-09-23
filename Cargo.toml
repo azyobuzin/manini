@@ -1,6 +1,6 @@
 [package]
 name = "manini"
-version = "0.2.0"
+version = "0.2.1"
 authors = ["azyobuzin <azyobuzin@users.sourceforge.jp>"]
 edition = "2024"
 repository = "https://github.com/azyobuzin/manini"
