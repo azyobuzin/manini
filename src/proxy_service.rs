@@ -1,3 +1,4 @@
+use crate::{RequestGuard, ServiceScaler};
 use http::header::{ACCEPT, CONTENT_TYPE, HOST, RETRY_AFTER, UPGRADE};
 use http::uri::Scheme;
 use http::{HeaderValue, Method, StatusCode, Uri, Version};
@@ -10,6 +11,7 @@ use hyper_util::client::legacy::{Client, Error as ClientError};
 use hyper_util::rt::TokioIo;
 use log::{debug, error, info, warn};
 use memchr::memmem;
+use pin_project_lite::pin_project;
 use std::error::Error;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
@@ -18,8 +20,6 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::time::error::Elapsed;
 use tokio::time::timeout;
-
-use crate::{RequestGuard, ServiceScaler};
 
 pub type ProxyHttpBody = BoxBody<Bytes, hyper::Error>;
 
@@ -31,11 +31,14 @@ pub struct ProxyServiceOptions<C> {
     pub remote_addr: IpAddr,
 }
 
-#[derive(Debug)]
-pub struct WrappedBody {
-    inner: ProxyHttpBody,
-    // Drop the guard after sending response
-    _request_guard: Option<RequestGuard>,
+pin_project! {
+    #[derive(Debug)]
+    pub struct WrappedBody {
+        #[pin]
+        inner: ProxyHttpBody,
+        // Drop the guard after sending response
+        _request_guard: Option<RequestGuard>,
+    }
 }
 
 impl HyperBody for WrappedBody {
@@ -46,8 +49,7 @@ impl HyperBody for WrappedBody {
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        // Safety: we never move `inner` after pinning `WrappedBody`.
-        unsafe { self.map_unchecked_mut(|s| &mut s.inner).poll_frame(cx) }
+        self.project().inner.poll_frame(cx)
     }
 
     fn is_end_stream(&self) -> bool {
@@ -67,6 +69,7 @@ where
     C: Connect + Clone + Send + Sync + 'static,
 {
     if !is_supported_method(req.method()) {
+        // Return 405 for unsupported metho
         info!("Unsupported request {} {}", req.method(), req.uri().path());
         let res = Response::builder()
             .status(StatusCode::METHOD_NOT_ALLOWED)
@@ -81,6 +84,7 @@ where
             match timeout_result {
                 Ok(x) => x?,
                 Err(_) => {
+                    // Return the waiting message for browsers
                     debug!("Return waiting message");
                     let res = Response::builder()
                         .status(StatusCode::SERVICE_UNAVAILABLE)
@@ -95,6 +99,7 @@ where
         }
     };
 
+    // Set Host header
     if !req.headers().contains_key(HOST) {
         if let Some(x) = req.uri().host() {
             let hv: HeaderValue = x.parse()?;
@@ -102,9 +107,11 @@ where
         }
     }
 
+    // Set X-Forwarded-For header
     req.headers_mut()
         .append("X-Forwarded-For", options.remote_addr.to_string().parse()?);
 
+    // Rewrite URI
     let path_and_query = req.uri().path_and_query();
     *req.uri_mut() = {
         let builder = Uri::builder().scheme(Scheme::HTTP).authority(
@@ -134,8 +141,10 @@ where
         return Ok(response);
     }
 
+    // The request is an upgrade (WebSocket) request
     debug!("Send upgrade request {} {}", req.method(), req.uri());
 
+    // Copy the request
     let mut req_to_send = Request::builder()
         .method(req.method())
         .uri(req.uri())
@@ -161,6 +170,7 @@ where
         return Ok(wrap_client_response(res, Some(request_guard)));
     }
 
+    // Connect the streams
     let res_upgraded = hyper::upgrade::on(&mut res).await?;
     tokio::spawn(async move {
         let req_path = req.uri().path().to_owned();
@@ -179,6 +189,7 @@ where
             warn!("Error on upgraded connection of {}: {}", req_path, e);
         }
 
+        // If the connection upgraded, drop the guard after disconnection.
         drop(request_guard);
     });
 
