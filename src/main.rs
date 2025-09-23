@@ -66,24 +66,15 @@ struct Cli {
 }
 
 async fn async_main(cli: Cli) -> ExitCode {
-    let Cli {
-        cluster,
-        service,
-        target_port,
-        ip,
-        scale_down_period,
-        bind,
-    } = cli;
-
     let service_scaler = {
         let config = aws_config::load_from_env().await;
         manini::run_scaler(ServiceScalerOptions {
             ecs_client: ecs::Client::new(&config),
             ec2_client: ec2::Client::new(&config),
-            cluster_name: cluster,
-            service_name: service,
-            ip_selection: ip,
-            scale_down_period: Duration::from_secs(scale_down_period),
+            cluster_name: cli.cluster,
+            service_name: cli.service,
+            ip_selection: cli.ip,
+            scale_down_period: Duration::from_secs(cli.scale_down_period),
         })
     };
 
@@ -94,15 +85,15 @@ async fn async_main(cli: Cli) -> ExitCode {
         Client::builder(TokioExecutor::new()).build(connector)
     };
 
-    let listener = match TcpListener::bind(bind).await {
+    let listener = match TcpListener::bind(cli.bind).await {
         Ok(listener) => listener,
         Err(e) => {
-            error!("Failed to bind to {}: {}", bind, e);
+            error!("Failed to bind to {}: {}", cli.bind, e);
             return ExitCode::FAILURE;
         }
     };
 
-    info!("Listening on {}", bind);
+    info!("Listening on {}", cli.bind);
 
     let connection_builder = auto::Builder::new(TokioExecutor::new());
 
@@ -117,7 +108,7 @@ async fn async_main(cli: Cli) -> ExitCode {
 
         let service_options = ProxyServiceOptions {
             service_scaler: service_scaler.clone(),
-            target_port,
+            target_port: cli.target_port,
             http_client: http_client.clone(),
             remote_addr: addr.ip(),
         };
